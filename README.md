@@ -129,24 +129,55 @@ To create a flat paper-author table, unnest and explode them, then save as a new
 
 **Example: paper-author table** (one row per paper-author pair)
 
+#### DuckDB
+
 ```sql
--- DuckDB
-COPY (
-    SELECT
-        w.id AS work_id,
-        w.publication_year,
-        a.author.id AS author_id,
-        a.author.display_name AS author_name,
-        a.institutions[1].id AS institution_id,
-        a.institutions[1].country_code AS country_code,
-        a.author_position
-    FROM read_parquet('data/intermediates/works.parquet') w,
-         unnest(from_json(w.authorships, '[{
-            "author": {"id": "VARCHAR", "display_name": "VARCHAR"},
-            "institutions": [{"id": "VARCHAR", "country_code": "VARCHAR"}],
-            "author_position": "VARCHAR"
-         }]')) AS a
-) TO 'data/intermediates/work_authors.parquet' (FORMAT PARQUET);
+import duckdb
+
+duckdb.sql("""
+    COPY (
+        SELECT
+            w.id AS work_id,
+            w.publication_year,
+            a.author.id AS author_id,
+            a.author.display_name AS author_name,
+            a.institutions[1].id AS institution_id,
+            a.institutions[1].country_code AS country_code,
+            a.author_position
+        FROM read_parquet('data/intermediates/works.parquet') w,
+             unnest(from_json(w.authorships, '[{
+                "author": {"id": "VARCHAR", "display_name": "VARCHAR"},
+                "institutions": [{"id": "VARCHAR", "country_code": "VARCHAR"}],
+                "author_position": "VARCHAR"
+             }]')) AS a
+    ) TO 'data/intermediates/work_authors.parquet' (FORMAT PARQUET);
+""")
+```
+
+#### Polars
+
+```python
+import json
+import polars as pl
+
+df = pl.read_parquet(
+    "data/intermediates/works.parquet",
+    columns=["id", "publication_year", "authorships"],
+)
+rows = []
+for row in df.iter_rows(named=True):
+    for auth in json.loads(row["authorships"] or "[]"):
+        inst = (auth.get("institutions") or [{}])[0] if auth.get("institutions") else {}
+        rows.append({
+            "work_id": row["id"],
+            "publication_year": row["publication_year"],
+            "author_id": auth.get("author", {}).get("id"),
+            "author_name": auth.get("author", {}).get("display_name"),
+            "institution_id": inst.get("id"),
+            "country_code": inst.get("country_code"),
+        })
+work_authors = pl.DataFrame(rows)
+work_authors.write_parquet("data/intermediates/work_authors.parquet")
 ```
 
 See `openalex_parse/derived/work_topics.py` for a full working example.
