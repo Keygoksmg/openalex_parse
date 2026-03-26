@@ -124,40 +124,32 @@ df.filter(pl.col("publication_year") == 2024).head(10).collect()
 
 ### 5. Create derived tables (Layer 2)
 
-Arrays (authorships, topics, etc.) are stored as JSON strings.
-Explode them using DuckDB or Polars:
+Arrays (authorships, topics, etc.) are stored as JSON strings in the base parquet.
+To create a flat paper-author table, unnest and explode them, then save as a new parquet.
 
-```python
-# DuckDB — SQL style
-import duckdb
+**Example: paper-author table** (one row per paper-author pair)
 
-duckdb.sql("""
+```sql
+-- DuckDB
+COPY (
     SELECT
-        id,
-        publication_year,
-        unnest(from_json(authorships, '["json"]')) AS auth
-    FROM read_parquet('data/intermediates/works.parquet')
-    WHERE publication_year = 2024
-""")
-
-# Polars — Python style
-import json, polars as pl
-
-df = pl.read_parquet("data/intermediates/works.parquet",
-                     columns=["id", "publication_year", "authorships"])
-rows = []
-for row in df.iter_rows(named=True):
-    for auth in json.loads(row["authorships"] or "[]"):
-        inst = (auth.get("institutions") or [{}])[0] if auth.get("institutions") else {}
-        rows.append({
-            "id": row["id"],
-            "author_id": auth.get("author", {}).get("id"),
-            "author_display_name": auth.get("author", {}).get("display_name"),
-            "institution_id": inst.get("id"),
-            "institution_country_code": inst.get("country_code"),
-        })
-work_authors = pl.DataFrame(rows)
+        w.id AS work_id,
+        w.publication_year,
+        a.author.id AS author_id,
+        a.author.display_name AS author_name,
+        a.institutions[1].id AS institution_id,
+        a.institutions[1].country_code AS country_code,
+        a.author_position
+    FROM read_parquet('data/intermediates/works.parquet') w,
+         unnest(from_json(w.authorships, '[{
+            "author": {"id": "VARCHAR", "display_name": "VARCHAR"},
+            "institutions": [{"id": "VARCHAR", "country_code": "VARCHAR"}],
+            "author_position": "VARCHAR"
+         }]')) AS a
+) TO 'data/intermediates/work_authors.parquet' (FORMAT PARQUET);
 ```
+
+See `openalex_parse/derived/work_topics.py` for a full working example.
 
 ## Adding new entity types
 
