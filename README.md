@@ -63,25 +63,20 @@ openalex_parse/              # repo root
 
 ## Quick Start
 
-All commands run from the repo root.
+All commands run from the repo root. Replace `/path/to/openalex/` with wherever you downloaded the [OpenAlex snapshot](https://docs.openalex.org/download-all-data/download-to-your-machine) (e.g. via `aws s3 sync`).
 
 ### 1. Detect schema (what fields exist in the raw data?)
 
 ```bash
-# Works (default)
-python -m openalex_parse.schema_detect
-
-# Different snapshot
+# Detect and diff against user schema
 python -m openalex_parse.schema_detect \
-    --data-dir /share/yin/openalex-2026_03_26/data/works
+    --data-dir /path/to/openalex/data/works \
+    --schema openalex_parse/schemas/works.py
 
-# Just detect, no diff
-python -m openalex_parse.schema_detect --detect-only
-
-# Authors
+# Just detect, no comparison
 python -m openalex_parse.schema_detect \
-    --data-dir /share/yin/openalex-2025_11_17/data/authors \
-    --schema openalex_parse/schemas/authors.py
+    --data-dir /path/to/openalex/data/authors \
+    --detect-only
 ```
 
 ### 2. Edit schema config
@@ -100,20 +95,20 @@ All three params (`--input`, `--output`, `--schema`) are required.
 ```bash
 # Works — test on one partition
 python -m openalex_parse.parse \
-    --input /share/yin/openalex-2025_11_17/data/works/updated_date=2025-11-11 \
+    --input /path/to/openalex/data/works/updated_date=2025-11-11 \
     --output data/intermediates/works_test.parquet \
     --schema openalex_parse/schemas/works.py \
     --limit 5000
 
 # Works — full directory
 python -m openalex_parse.parse \
-    --input /share/yin/openalex-2025_11_17/data/works \
+    --input /path/to/openalex/data/works \
     --output data/intermediates/works.parquet \
     --schema openalex_parse/schemas/works.py
 
 # Authors
 python -m openalex_parse.parse \
-    --input /share/yin/openalex-2025_11_17/data/authors \
+    --input /path/to/openalex/data/authors \
     --output data/intermediates/authors.parquet \
     --schema openalex_parse/schemas/authors.py
 ```

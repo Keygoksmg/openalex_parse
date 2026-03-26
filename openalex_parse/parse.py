@@ -8,20 +8,20 @@ to the appropriate schema config file.
 Usage:
     # Works — full directory
     python -m openalex_parse.parse \
-        --input /share/yin/openalex-2025_11_17/data/works \
+        --input /path/to/openalex/data/works \
         --output data/intermediates/works.parquet \
         --schema openalex_parse/schemas/works.py
 
     # Works — test on a single partition with limit
     python -m openalex_parse.parse \
-        --input /share/yin/openalex-2025_11_17/data/works/updated_date=2025-11-11 \
+        --input /path/to/openalex/data/works/updated_date=2025-11-11 \
         --output data/intermediates/works_test.parquet \
         --schema openalex_parse/schemas/works.py \
         --limit 5000
 
     # Authors
     python -m openalex_parse.parse \
-        --input /share/yin/openalex-2025_11_17/data/authors \
+        --input /path/to/openalex/data/authors \
         --output data/intermediates/authors.parquet \
         --schema openalex_parse/schemas/authors.py
 """

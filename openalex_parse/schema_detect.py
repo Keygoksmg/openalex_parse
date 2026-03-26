@@ -5,22 +5,21 @@ Samples N records from raw gz JSON, catalogs every field with type/depth/frequen
 then diffs against a user-defined schema config.
 
 Usage:
-    # Works (default schema)
-    python -m openalex_parse.schema_detect
-
-    # Custom snapshot
-    python -m openalex_parse.schema_detect --data-dir /share/yin/openalex-2026_03_26/data/works
-
-    # Authors with a different schema
+    # Detect and diff against user schema
     python -m openalex_parse.schema_detect \
-        --data-dir /share/yin/openalex-2025_11_17/data/authors \
-        --schema openalex_parse/schemas/authors.py
+        --data-dir /path/to/openalex/data/works \
+        --schema openalex_parse/schemas/works.py
 
     # Just detect, no comparison
-    python -m openalex_parse.schema_detect --detect-only
+    python -m openalex_parse.schema_detect \
+        --data-dir /path/to/openalex/data/authors \
+        --detect-only
 
     # More samples
-    python -m openalex_parse.schema_detect --sample-size 5000
+    python -m openalex_parse.schema_detect \
+        --data-dir /path/to/openalex/data/works \
+        --schema openalex_parse/schemas/works.py \
+        --sample-size 5000
 """
 
 import argparse
@@ -217,10 +216,7 @@ def print_report(detected, user_schema, n_records, partition, detect_only=False)
         print(f"  To add missing fields, edit your schema config file.")
 
 
-# Default paths (relative to project root)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATA_DIR = "/share/yin/openalex-2025_11_17/data/works"
-DEFAULT_SCHEMA = PROJECT_ROOT / "openalex_parse" / "schemas" / "works.py"
 
 
 if __name__ == "__main__":
@@ -228,8 +224,8 @@ if __name__ == "__main__":
         description="Detect OpenAlex schema and diff against user-defined config"
     )
     parser.add_argument(
-        "--data-dir", type=str, default=DEFAULT_DATA_DIR,
-        help="Path to data directory (default: Nov 2025 works)",
+        "--data-dir", type=str, required=True,
+        help="Path to data directory (e.g. /path/to/openalex/data/works)",
     )
     parser.add_argument(
         "--partition", type=str, default=None,
@@ -240,8 +236,8 @@ if __name__ == "__main__":
         help="Number of records to sample (default: 1000)",
     )
     parser.add_argument(
-        "--schema", type=str, default=str(DEFAULT_SCHEMA),
-        help="Path to user-defined schema config file (default: openalex_parse/schemas/works.py)",
+        "--schema", type=str, default=None,
+        help="Path to user-defined schema config file (required unless --detect-only)",
     )
     parser.add_argument(
         "--detect-only", action="store_true",
@@ -280,6 +276,9 @@ if __name__ == "__main__":
     if args.detect_only:
         user_schema = {}
     else:
+        if args.schema is None:
+            print("ERROR: --schema is required unless --detect-only is set")
+            sys.exit(1)
         schema_path = Path(args.schema)
         print(f"Loading user schema from {schema_path}...")
         user_schema = load_user_schema(schema_path)
