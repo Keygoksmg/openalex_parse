@@ -124,8 +124,7 @@ df.filter(pl.col("publication_year") == 2024).head(10).collect()
 
 ### 5. Create derived tables (Layer 2)
 
-Arrays (authorships, topics, etc.) are stored as JSON strings in the base parquet.
-To create a flat paper-author table, unnest and explode them, then save as a new parquet.
+Once Layer 1 converts raw .gz files into a queryable base parquet, you can create smaller, analysis-ready derived tables by unnesting and exploding the JSON array columns (authorships, topics, etc.).
 
 **Example: paper-author table** (one row per paper-author pair)
 
