@@ -38,6 +38,10 @@ def main():
     t0 = time.time()
     con = duckdb.connect()
 
+    # Escape paths for safe SQL interpolation
+    inp = str(input_path).replace("'", "''")
+    out = str(output_path).replace("'", "''")
+
     con.execute(f"""
         COPY (
             SELECT
@@ -48,7 +52,7 @@ def main():
                 t.subfield.display_name AS subfield,
                 t.field.display_name AS field,
                 t.domain.display_name AS domain
-            FROM read_parquet('{input_path}'),
+            FROM read_parquet('{inp}'),
             LATERAL (
                 SELECT UNNEST(from_json(topics, '[{{
                     "id": "VARCHAR",
@@ -60,14 +64,14 @@ def main():
                 }}]')) AS t
             )
             WHERE topics IS NOT NULL AND topics != '[]'
-        ) TO '{output_path}' (FORMAT PARQUET)
+        ) TO '{out}' (FORMAT PARQUET)
     """)
 
     t1 = time.time()
 
     # Summary
     row_count = con.execute(
-        f"SELECT COUNT(*) FROM read_parquet('{output_path}')"
+        f"SELECT COUNT(*) FROM read_parquet('{out}')"
     ).fetchone()[0]
     file_size = output_path.stat().st_size / 1024 / 1024
 

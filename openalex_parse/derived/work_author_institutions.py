@@ -39,6 +39,10 @@ def main():
     t0 = time.time()
     con = duckdb.connect()
 
+    # Escape paths for safe SQL interpolation
+    inp = str(input_path).replace("'", "''")
+    out = str(output_path).replace("'", "''")
+
     con.execute(f"""
         COPY (
             SELECT
@@ -58,7 +62,7 @@ def main():
                 a.institutions[1].ror AS first_institution_ror,
                 a.institutions[1].country_code AS first_institution_country_code,
                 a.institutions[1].type AS first_institution_type
-            FROM read_parquet('{input_path}') w,
+            FROM read_parquet('{inp}') w,
             LATERAL (
                 SELECT UNNEST(from_json(w.authorships, '[{{
                     "author_position": "VARCHAR",
@@ -80,14 +84,14 @@ def main():
                 }}]')) AS a
             )
             WHERE w.authorships IS NOT NULL AND w.authorships != '[]'
-        ) TO '{output_path}' (FORMAT PARQUET)
+        ) TO '{out}' (FORMAT PARQUET)
     """)
 
     t1 = time.time()
 
     # Summary
     row_count = con.execute(
-        f"SELECT COUNT(*) FROM read_parquet('{output_path}')"
+        f"SELECT COUNT(*) FROM read_parquet('{out}')"
     ).fetchone()[0]
     file_size = output_path.stat().st_size / 1024 / 1024
 

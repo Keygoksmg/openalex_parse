@@ -47,8 +47,10 @@ def reconstruct_abstract(inverted_index_str):
     if not words:
         return None
 
-    # Reconstruct by sorting positions
+    # Reconstruct by sorting positions (cap at 100k to guard against corrupted data)
     max_pos = max(words.keys())
+    if max_pos > 100_000:
+        return None
     return " ".join(words.get(i, "") for i in range(max_pos + 1))
 
 

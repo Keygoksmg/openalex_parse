@@ -27,6 +27,8 @@ Usage:
 """
 
 import argparse
+import ast
+import re
 import sys
 import time
 from pathlib import Path
@@ -34,26 +36,8 @@ from pathlib import Path
 import duckdb
 
 
-def load_schema(schema_path):
-    """Load schema config from a schema file.
-
-    The schema file must define a dict named *_SCHEMA (e.g., WORKS_SCHEMA,
-    AUTHORS_SCHEMA) where keys are field names and values have a "type" key.
-
-    Returns the schema dict.
-    """
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("schema_config", schema_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    for attr_name in dir(mod):
-        if attr_name.endswith("_SCHEMA") and isinstance(getattr(mod, attr_name), dict):
-            return getattr(mod, attr_name)
-
-    print(f"ERROR: No *_SCHEMA dict found in {schema_path}")
-    sys.exit(1)
-
+# Field names must be alphanumeric + underscores (no SQL injection via field names)
+_VALID_FIELD_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 # DuckDB type mapping
 DUCKDB_TYPES = {
@@ -63,6 +47,49 @@ DUCKDB_TYPES = {
     "bool": "BOOLEAN",
     "json": "JSON",
 }
+
+
+def _escape_sql_string(s):
+    """Escape single quotes for safe SQL string interpolation."""
+    return str(s).replace("'", "''")
+
+
+def load_schema(schema_path):
+    """Load schema config from a schema file using ast.literal_eval (no code execution).
+
+    The schema file must define a dict named *_SCHEMA (e.g., WORKS_SCHEMA).
+    Only literal Python expressions are evaluated — no arbitrary code runs.
+
+    Returns the schema dict.
+    """
+    schema_path = Path(schema_path)
+    source = schema_path.read_text()
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.endswith("_SCHEMA"):
+                    schema = ast.literal_eval(node.value)
+                    _validate_schema(schema, schema_path)
+                    return schema
+
+    print(f"ERROR: No *_SCHEMA dict found in {schema_path}")
+    sys.exit(1)
+
+
+def _validate_schema(schema, schema_path):
+    """Validate schema field names and types."""
+    for field, config in schema.items():
+        if not _VALID_FIELD_RE.match(field):
+            print(f"ERROR: Invalid field name '{field}' in {schema_path}. "
+                  f"Must match [a-zA-Z_][a-zA-Z0-9_]*")
+            sys.exit(1)
+        ftype = config.get("type")
+        if ftype not in DUCKDB_TYPES:
+            print(f"ERROR: Invalid type '{ftype}' for field '{field}' in {schema_path}. "
+                  f"Must be one of: {set(DUCKDB_TYPES.keys())}")
+            sys.exit(1)
 
 
 def build_select_clause(schema):
@@ -75,7 +102,6 @@ def build_select_clause(schema):
     for field, config in schema.items():
         ftype = config["type"]
         if ftype == "json":
-            # to_json() → valid JSON, CAST to VARCHAR so parquet stores as string not binary
             parts.append(f'CAST(to_json("{field}") AS VARCHAR) AS "{field}"')
         else:
             duckdb_type = DUCKDB_TYPES[ftype]
@@ -102,7 +128,6 @@ def build_columns_spec(schema):
 def find_gz_glob(input_dir):
     """Build a glob pattern for DuckDB to find .gz files."""
     input_dir = Path(input_dir)
-    # Check if gz files are directly in the dir or in subdirectories
     direct = list(input_dir.glob("*.gz"))
     nested = list(input_dir.glob("*/*.gz"))
 
@@ -158,10 +183,13 @@ def main():
     con = duckdb.connect()
 
     # Build column spec from schema — tells DuckDB exactly what to expect
-    # Missing columns in data → NULL, extra columns in data → ignored
     columns_spec = build_columns_spec(schema)
     select_clause = build_select_clause(schema)
     limit_clause = f"LIMIT {args.limit}" if args.limit else ""
+
+    # Escape paths for safe SQL interpolation
+    gz_glob_safe = _escape_sql_string(gz_glob)
+    output_safe = _escape_sql_string(output_path)
 
     # Read gz JSON → extract fields → write parquet (streamed, memory safe)
     print("Parsing gz JSON → parquet via DuckDB...")
@@ -170,20 +198,20 @@ def main():
             SELECT
                 {select_clause}
             FROM read_json(
-                '{gz_glob}',
+                '{gz_glob_safe}',
                 format = 'newline_delimited',
                 columns = {columns_spec},
                 maximum_object_size = 10485760
             )
             {limit_clause}
-        ) TO '{output_path}' (FORMAT PARQUET)
+        ) TO '{output_safe}' (FORMAT PARQUET)
     """
     con.execute(query)
     t1 = time.time()
 
     # Summary
     row_count = con.execute(
-        f"SELECT COUNT(*) FROM read_parquet('{output_path}')"
+        f"SELECT COUNT(*) FROM read_parquet('{output_safe}')"
     ).fetchone()[0]
     file_size = output_path.stat().st_size / 1024 / 1024
 

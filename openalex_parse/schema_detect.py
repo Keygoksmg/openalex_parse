@@ -28,29 +28,32 @@ Usage:
 """
 
 import argparse
+import ast
 import gzip
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 
 def load_user_schema(schema_path):
-    """Load the user-defined schema from a config file.
+    """Load the user-defined schema from a config file using ast.literal_eval.
 
     The config file must define a dict named *_SCHEMA (e.g., WORKS_SCHEMA,
     AUTHORS_SCHEMA) where keys are field names and values have a "type" key.
+    No arbitrary code is executed — only literal expressions are evaluated.
     """
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("schema_config", schema_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    schema_path = Path(schema_path)
+    source = schema_path.read_text()
+    tree = ast.parse(source)
 
-    # Find the first dict attribute ending with _SCHEMA
-    for attr_name in dir(mod):
-        if attr_name.endswith("_SCHEMA") and isinstance(getattr(mod, attr_name), dict):
-            schema_dict = getattr(mod, attr_name)
-            return {field: config["type"] for field, config in schema_dict.items()}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.endswith("_SCHEMA"):
+                    schema_dict = ast.literal_eval(node.value)
+                    return {field: config["type"] for field, config in schema_dict.items()}
 
     print(f"ERROR: No *_SCHEMA dict found in {schema_path}")
     sys.exit(1)
@@ -291,6 +294,9 @@ def infer_schema_type(type_counts):
 
 def generate_schema_file(detected, output_path, entity_name, partitions_sampled):
     """Generate a schema .py file from detected fields."""
+    # Sanitize entity name for use as Python identifier
+    entity_name = re.sub(r"[^a-zA-Z0-9_]", "_", entity_name)
+
     # Classify fields
     scalars = []
     nested_objects = []
