@@ -15,6 +15,11 @@ Usage:
         --data-dir /path/to/openalex/data/authors \
         --detect-only
 
+    # Auto-generate a schema file (samples from earliest + latest partitions)
+    python -m openalex_parse.schema_detect \
+        --data-dir /path/to/openalex/data/works \
+        --generate openalex_parse/schemas/works.py
+
     # More samples
     python -m openalex_parse.schema_detect \
         --data-dir /path/to/openalex/data/works \
@@ -216,6 +221,158 @@ def print_report(detected, user_schema, n_records, partition, detect_only=False)
         print(f"  To add missing fields, edit your schema config file.")
 
 
+def sample_multi_partition(data_dir, sample_size):
+    """Sample records from the earliest and latest partitions for robust detection.
+
+    Takes sample_size/2 from the latest partition and distributes the rest
+    across up to 3 of the earliest partitions. This catches fields that may
+    only exist in older or newer data.
+    """
+    partitions = sorted(
+        [d.name for d in data_dir.iterdir()
+         if d.is_dir() and d.name.startswith("updated_date=")]
+    )
+    if not partitions:
+        print(f"ERROR: No partitions found in {data_dir}")
+        sys.exit(1)
+
+    # Pick partitions: latest + up to 3 earliest (deduplicated)
+    selected = [partitions[-1]]
+    early = partitions[:3]
+    for p in early:
+        if p not in selected:
+            selected.append(p)
+
+    # Distribute sample budget
+    n_latest = sample_size // 2
+    n_early_each = (sample_size - n_latest) // max(len(selected) - 1, 1)
+
+    all_records = []
+    for i, partition in enumerate(selected):
+        n = n_latest if i == 0 else n_early_each
+        records = sample_records(data_dir, partition, n)
+        print(f"  {partition}: {len(records)} records")
+        all_records.extend(records)
+
+    return all_records, selected
+
+
+def infer_schema_type(type_counts):
+    """Infer the schema type from observed type counts.
+
+    Returns one of: "str", "int", "float", "bool", "json"
+    """
+    # Remove nulls for type inference
+    non_null = {t: c for t, c in type_counts.items() if t != "null"}
+    if not non_null:
+        return "str"  # all-null field, default to str
+
+    types = set(non_null.keys())
+
+    # Any list or dict → json
+    if any(t.startswith("list") or t == "dict" for t in types):
+        return "json"
+
+    # Pure bool
+    if types == {"bool"}:
+        return "bool"
+
+    # Pure int (no float mixing)
+    if types == {"int"}:
+        return "int"
+
+    # Float or int+float mix
+    if types <= {"int", "float"}:
+        return "float"
+
+    # Everything else is str
+    return "str"
+
+
+def generate_schema_file(detected, output_path, entity_name, partitions_sampled):
+    """Generate a schema .py file from detected fields."""
+    # Classify fields
+    scalars = []
+    nested_objects = []
+    arrays = []
+    special = []
+
+    for field, info in detected.items():
+        schema_type = infer_schema_type(info["types"])
+        non_null_types = {t for t in info["types"] if t != "null"}
+
+        if field == "abstract_inverted_index":
+            special.append((field, "json"))
+        elif schema_type == "json":
+            # Distinguish nested objects from arrays
+            if any(t.startswith("list") for t in non_null_types):
+                arrays.append((field, "json"))
+            else:
+                nested_objects.append((field, "json"))
+        else:
+            scalars.append((field, schema_type))
+
+    # Build schema name from entity
+    clean_name = entity_name.replace("-", "_")
+    schema_var = f"{clean_name.upper()}_SCHEMA"
+
+    # Compute max field name length for alignment
+    all_fields = scalars + nested_objects + arrays + special
+    max_len = max(len(f) for f, _ in all_fields) if all_fields else 30
+
+    lines = []
+    lines.append('"""')
+    lines.append(f"User-defined schema config for the {clean_name} table.")
+    lines.append("")
+    lines.append(f"Auto-generated via schema_detect from partitions:")
+    for p in partitions_sampled:
+        lines.append(f"  - {p}")
+    lines.append("")
+    lines.append("Each entry: field_name -> {\"type\": output_type}")
+    lines.append('  - "str", "int", "float", "bool" -> typed scalar columns')
+    lines.append('  - "json" -> stored as JSON string (nested objects and arrays)')
+    lines.append('"""')
+    lines.append("")
+    lines.append(f"{schema_var} = {{")
+
+    if scalars:
+        lines.append("    # ── Scalar fields ────────────────────────────────────────────────────────")
+        for field, ftype in scalars:
+            padding = " " * (max_len - len(field))
+            lines.append(f'    "{field}":{padding} {{"type": "{ftype}"}},')
+
+    if nested_objects:
+        lines.append("")
+        lines.append("    # ── Nested objects (stored as JSON string) ───────────────────────────────")
+        for field, ftype in nested_objects:
+            padding = " " * (max_len - len(field))
+            lines.append(f'    "{field}":{padding} {{"type": "{ftype}"}},')
+
+    if arrays:
+        lines.append("")
+        lines.append("    # ── Arrays (stored as JSON string) ───────────────────────────────────────")
+        for field, ftype in arrays:
+            padding = " " * (max_len - len(field))
+            lines.append(f'    "{field}":{padding} {{"type": "{ftype}"}},')
+
+    if special:
+        lines.append("")
+        lines.append("    # ── Special ──────────────────────────────────────────────────────────────")
+        for field, ftype in special:
+            padding = " " * (max_len - len(field))
+            lines.append(f'    "{field}":{padding} {{"type": "{ftype}"}},')
+
+    lines.append("}")
+    lines.append("")
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines))
+    print(f"\nGenerated schema: {output_path}")
+    print(f"  Variable: {schema_var}")
+    print(f"  Fields:   {len(all_fields)}")
+
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -243,10 +400,42 @@ if __name__ == "__main__":
         "--detect-only", action="store_true",
         help="Only detect schema, skip diff against user config",
     )
+    parser.add_argument(
+        "--generate", type=str, default=None,
+        metavar="OUTPUT_PATH",
+        help="Auto-generate a schema .py file (samples earliest + latest partitions)",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
 
+    # ── Generate mode: sample multiple partitions, write schema file ──────
+    if args.generate:
+        entity_name = data_dir.name
+        print(f"Generating schema for: {entity_name}")
+        print(f"Data dir: {data_dir}")
+        print(f"Sampling from earliest + latest partitions...\n")
+
+        records, partitions_sampled = sample_multi_partition(
+            data_dir, args.sample_size
+        )
+        print(f"\nTotal: {len(records)} records from {len(partitions_sampled)} partitions\n")
+
+        print("Detecting schema...")
+        detected = detect_schema(records)
+
+        print(f"\nDetected {len(detected)} fields:")
+        for field, info in detected.items():
+            schema_type = infer_schema_type(info["types"])
+            types_str = ", ".join(
+                f"{t}({c})" for t, c in sorted(info["types"].items(), key=lambda x: -x[1])
+            )
+            print(f"  {field:<40} -> {schema_type:<6}  ({types_str})")
+
+        generate_schema_file(detected, args.generate, entity_name, partitions_sampled)
+        sys.exit(0)
+
+    # ── Normal detect/diff mode ───────────────────────────────────────────
     # Auto-detect latest partition if not specified
     if args.partition is None:
         partitions = sorted(

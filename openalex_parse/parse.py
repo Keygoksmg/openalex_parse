@@ -83,6 +83,22 @@ def build_select_clause(schema):
     return ",\n        ".join(parts)
 
 
+def build_columns_spec(schema):
+    """Build a DuckDB columns dict from schema config.
+
+    Returns a SQL fragment like: {'id': 'VARCHAR', 'year': 'BIGINT', ...}
+    This tells read_json exactly what columns to expect, so:
+      - Missing columns in the data become NULL automatically
+      - Extra columns in the data are ignored
+      - No separate column detection step needed
+    """
+    pairs = []
+    for field, config in schema.items():
+        duckdb_type = DUCKDB_TYPES[config["type"]]
+        pairs.append(f"'{field}': '{duckdb_type}'")
+    return "{" + ", ".join(pairs) + "}"
+
+
 def find_gz_glob(input_dir):
     """Build a glob pattern for DuckDB to find .gz files."""
     input_dir = Path(input_dir)
@@ -135,15 +151,17 @@ def main():
         print(f"Limit:          {args.limit:,}")
     print()
 
-    # Build query
-    select_clause = build_select_clause(schema)
-    limit_clause = f"LIMIT {args.limit}" if args.limit else ""
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
 
     con = duckdb.connect()
+
+    # Build column spec from schema — tells DuckDB exactly what to expect
+    # Missing columns in data → NULL, extra columns in data → ignored
+    columns_spec = build_columns_spec(schema)
+    select_clause = build_select_clause(schema)
+    limit_clause = f"LIMIT {args.limit}" if args.limit else ""
 
     # Read gz JSON → extract fields → write parquet (streamed, memory safe)
     print("Parsing gz JSON → parquet via DuckDB...")
@@ -151,10 +169,10 @@ def main():
         COPY (
             SELECT
                 {select_clause}
-            FROM read_json_auto(
+            FROM read_json(
                 '{gz_glob}',
                 format = 'newline_delimited',
-                union_by_name = true,
+                columns = {columns_spec},
                 maximum_object_size = 10485760
             )
             {limit_clause}

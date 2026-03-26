@@ -1,7 +1,7 @@
 # openalex_parse
 
 Generic pipeline for parsing raw [OpenAlex](https://openalex.org/) gz JSON snapshots into parquet.
-Works with any entity type (works, authors, concepts, etc.) — just point it
+Works with any entity type (works, authors, institutions, etc.) — just point it
 at the right schema config.
 
 ## Why
@@ -37,7 +37,7 @@ so downstream analysis can read only the columns and rows it needs — fast and 
 │  Layer 2: Derived Tables (ad hoc, per project)                  │
 │                                                                 │
 │  Parquet  ──►  Exploded/joined tables                           │
-│                work_author_affiliations, work_topics, etc.      │
+│                work_author_institutions, work_topics, etc.      │
 │                                                                 │
 │  - Complex operations: explode arrays, join tables, filter      │
 │  - Reads only needed columns from parquet (fast)                │
@@ -52,13 +52,23 @@ so downstream analysis can read only the columns and rows it needs — fast and 
 openalex_parse/              # repo root
 ├── openalex_parse/          # Python package
 │   ├── parse.py             # Generic parser: gz JSON → parquet (DuckDB engine)
-│   ├── schema_detect.py     # Detect fields in raw data, diff against user schema
-│   ├── schemas/
-│   │   └── works.py         # User-defined schema for works (add authors.py, etc.)
+│   ├── schema_detect.py     # Detect fields, diff against schema, auto-generate schema files
+│   ├── schemas/             # User-defined schemas (21 entity types)
+│   │   ├── works.py         # 65 fields (union across snapshots)
+│   │   ├── authors.py       # 18 fields
+│   │   ├── institutions.py  # 29 fields
+│   │   ├── sources.py       # 36 fields
+│   │   └── ...              # awards, concepts, countries, domains, fields, funders,
+│   │                        # institution_types, keywords, languages, licenses,
+│   │                        # publishers, sdgs, source_types, subfields, topics, etc.
 │   └── derived/
-│       └── work_topics.py   # Example Layer 2: paper × topic exploded table
+│       ├── work_topics.py              # Paper × topic exploded table
+│       ├── work_title_abstracts.py     # Reconstruct abstracts from inverted index
+│       └── work_author_institutions.py # Paper × author × institution flat table
 └── tests/
-    └── test_parse_works.py
+    ├── test_parse_works.py  # Parser tests (works round-trip, integration)
+    ├── test_schemas.py      # Schema loading + round-trip for all entities
+    └── test_derived.py      # Derived table tests (abstract reconstruction, authorship explode)
 ```
 
 ## Quick Start
@@ -79,14 +89,21 @@ python -m openalex_parse.schema_detect \
     --detect-only
 ```
 
-### 2. Edit schema config
+### 2. Auto-generate or edit schema
 
-Edit `openalex_parse/schemas/works.py` to control which fields are extracted:
+```bash
+# Auto-generate a schema file (samples earliest + latest partitions for robustness)
+python -m openalex_parse.schema_detect \
+    --data-dir /path/to/openalex/data/works \
+    --generate openalex_parse/schemas/works.py
+```
+
+Or edit manually. Each schema file defines a dict named `*_SCHEMA` (e.g., `WORKS_SCHEMA`):
 
 - `"str"`, `"int"`, `"float"`, `"bool"` → typed scalar columns
 - `"json"` → stored as valid JSON string (for nested objects and arrays)
 
-Each schema file must define a dict named `*_SCHEMA` (e.g., `WORKS_SCHEMA`).
+Fields in the schema but missing from the data become `NULL` automatically — safe to use one schema across snapshots.
 
 ### 3. Parse to parquet (Layer 1)
 
@@ -126,11 +143,28 @@ df.filter(pl.col("publication_year") == 2024).head(10).collect()
 
 Once Layer 1 converts raw .gz files into a queryable base parquet, you can create smaller, analysis-ready derived tables by unnesting and exploding the JSON array columns (authorships, topics, etc.).
 
-**Example: paper-author table** (one row per paper-author pair)
+#### CLI-based derived tables
 
-#### DuckDB
+```bash
+# Work-topics
+python -m openalex_parse.derived.work_topics \
+    --input data/intermediates/works.parquet \
+    --output data/intermediates/work_topics.parquet
 
-```sql
+# Work-title-abstracts (reconstructs abstract text from inverted index)
+python -m openalex_parse.derived.work_title_abstracts \
+    --input data/intermediates/works.parquet \
+    --output data/intermediates/work_title_abstracts.parquet
+
+# Work-author-institutions (one row per paper × author)
+python -m openalex_parse.derived.work_author_institutions \
+    --input data/intermediates/works.parquet \
+    --output data/intermediates/work_author_institutions.parquet
+```
+
+#### Custom derived tables (DuckDB example)
+
+```python
 import duckdb
 
 duckdb.sql("""
@@ -153,7 +187,7 @@ duckdb.sql("""
 """)
 ```
 
-#### Polars
+#### Custom derived tables (Polars example)
 
 ```python
 import json
@@ -179,20 +213,19 @@ work_authors = pl.DataFrame(rows)
 work_authors.write_parquet("data/intermediates/work_authors.parquet")
 ```
 
-See `openalex_parse/derived/work_topics.py` for a full working example.
-
 ## Adding new entity types
 
-To parse `authors/`, `sources/`, etc.:
+To parse `sources/`, `funders/`, etc.:
 
-1. Detect: `python -m openalex_parse.schema_detect --data-dir .../data/authors --detect-only`
-2. Create `openalex_parse/schemas/authors.py` with an `AUTHORS_SCHEMA` dict
-3. Parse: `python -m openalex_parse.parse --input .../data/authors --output .../authors.parquet --schema openalex_parse/schemas/authors.py`
+1. Auto-generate schema: `python -m openalex_parse.schema_detect --data-dir .../data/sources --generate openalex_parse/schemas/sources.py`
+2. Review and edit the generated schema if needed
+3. Parse: `python -m openalex_parse.parse --input .../data/sources --output .../sources.parquet --schema openalex_parse/schemas/sources.py`
 
 No new parser code needed — the same `parse.py` handles everything.
+Schemas already exist for all 21 entity types in the Mar 2026 snapshot.
 
 ## Tests
 
 ```bash
-python -m pytest tests/test_parse_works.py -v
+python -m pytest tests/ -v
 ```

@@ -8,7 +8,7 @@ import duckdb
 import polars as pl
 import pytest
 
-from openalex_parse.parse import load_schema, build_select_clause, find_gz_glob
+from openalex_parse.parse import load_schema, build_select_clause, build_columns_spec, find_gz_glob
 from openalex_parse.schema_detect import classify_type, detect_schema, load_user_schema
 from openalex_parse.schemas.works import WORKS_SCHEMA
 
@@ -23,18 +23,31 @@ SAMPLE_RECORD = {
     "publication_year": 2023,
     "publication_date": "2023-06-15",
     "language": "en",
+    "language_id": "https://openalex.org/languages/en",
     "type": "article",
+    "type_crossref": "journal-article",
+    "type_id": "https://openalex.org/work-types/article",
     "cited_by_count": 10,
     "fwci": 1.5,
     "referenced_works_count": 5,
     "authors_count": 3,
+    "concepts_count": 0,
+    "topics_count": 1,
+    "locations_count": 1,
     "institutions_distinct_count": 2,
     "countries_distinct_count": 2,
     "has_abstract": True,
+    "has_fulltext": True,
     "is_retracted": False,
     "is_paratext": False,
+    "is_xpac": False,
     "publisher": "Test Publisher",
+    "doi_registration_agency": "Crossref",
+    "fulltext_origin": "pdf",
+    "cited_by_api_url": "https://api.openalex.org/works?filter=cites:W123456789",
     "created_date": "2023-06-01",
+    "updated": "2023-06-15T00:00:00.000000",
+    "updated_date": "2023-06-15T00:00:00.000000",
     "ids": {"openalex": "https://openalex.org/W123456789"},
     "primary_location": {"source": {"id": "https://openalex.org/S1", "display_name": "Test Journal"}},
     "open_access": {"is_oa": True, "oa_status": "gold"},
@@ -45,6 +58,8 @@ SAMPLE_RECORD = {
     "apc_paid": None,
     "biblio": {"volume": "1", "issue": "2", "first_page": "10", "last_page": "20"},
     "primary_topic": {"id": "https://openalex.org/T100", "display_name": "Machine Learning"},
+    "summary_stats": {"cited_by_count": 10, "2yr_cited_by_count": 5},
+    "has_content": {"pdf": False, "grobid_xml": False},
     "indexed_in": ["crossref", "doaj"],
     "authorships": [
         {
@@ -67,6 +82,17 @@ SAMPLE_RECORD = {
     "referenced_works": ["https://openalex.org/W111", "https://openalex.org/W222"],
     "locations": [{"source": {"display_name": "Test Journal"}}],
     "counts_by_year": [{"year": 2023, "cited_by_count": 5}],
+    "corresponding_author_ids": ["https://openalex.org/A1"],
+    "corresponding_institution_ids": ["https://openalex.org/I1"],
+    "sustainable_development_goals": [],
+    "grants": [],
+    "mesh": [],
+    "datasets": [],
+    "versions": [],
+    "institution_assertions": [],
+    "awards": [],
+    "funders": [],
+    "institutions": [],
     "abstract_inverted_index": {"This": [0], "is": [1], "a": [2], "test": [3]},
 }
 
@@ -78,18 +104,31 @@ SAMPLE_RECORD_NULLS = {
     "publication_year": 2020,
     "publication_date": "2020-01-01",
     "language": None,
+    "language_id": None,
     "type": "article",
+    "type_crossref": None,
+    "type_id": None,
     "cited_by_count": 0,
     "fwci": 0.0,
     "referenced_works_count": 0,
     "authors_count": 0,
+    "concepts_count": 0,
+    "topics_count": 0,
+    "locations_count": 0,
     "institutions_distinct_count": 0,
     "countries_distinct_count": 0,
     "has_abstract": False,
+    "has_fulltext": False,
     "is_retracted": None,
     "is_paratext": False,
+    "is_xpac": None,
     "publisher": None,
+    "doi_registration_agency": None,
+    "fulltext_origin": None,
+    "cited_by_api_url": None,
     "created_date": "2020-01-01",
+    "updated": None,
+    "updated_date": None,
     "ids": {},
     "primary_location": None,
     "open_access": {"is_oa": False},
@@ -100,6 +139,8 @@ SAMPLE_RECORD_NULLS = {
     "apc_paid": None,
     "biblio": {},
     "primary_topic": None,
+    "summary_stats": None,
+    "has_content": None,
     "indexed_in": [],
     "authorships": [],
     "keywords": [],
@@ -109,6 +150,17 @@ SAMPLE_RECORD_NULLS = {
     "referenced_works": [],
     "locations": [],
     "counts_by_year": [],
+    "corresponding_author_ids": [],
+    "corresponding_institution_ids": [],
+    "sustainable_development_goals": [],
+    "grants": [],
+    "mesh": [],
+    "datasets": [],
+    "versions": [],
+    "institution_assertions": [],
+    "awards": [],
+    "funders": [],
+    "institutions": [],
     "abstract_inverted_index": None,
 }
 
@@ -257,23 +309,30 @@ class TestDetectSchema:
 # ── DuckDB round-trip ────────────────────────────────────────────────────────
 
 class TestDuckDBRoundTrip:
-    def test_parse_write_read_back(self, sample_gz_dir, tmp_path):
-        """Full pipeline: gz → DuckDB parse → parquet → read back → verify."""
-        output_path = tmp_path / "test.parquet"
+    def _run_parse(self, gz_dir, output_path, limit=None):
+        """Helper: parse gz → parquet using production code path."""
         select_clause = build_select_clause(WORKS_SCHEMA)
-        gz_glob = find_gz_glob(sample_gz_dir)
+        columns_spec = build_columns_spec(WORKS_SCHEMA)
+        gz_glob = find_gz_glob(gz_dir)
+        limit_clause = f"LIMIT {limit}" if limit else ""
 
         con = duckdb.connect()
         con.execute(f"""
             COPY (
                 SELECT {select_clause}
-                FROM read_json_auto('{gz_glob}',
+                FROM read_json('{gz_glob}',
                     format='newline_delimited',
-                    union_by_name=true,
+                    columns={columns_spec},
                     maximum_object_size=10485760)
+                {limit_clause}
             ) TO '{output_path}' (FORMAT PARQUET)
         """)
         con.close()
+
+    def test_parse_write_read_back(self, sample_gz_dir, tmp_path):
+        """Full pipeline: gz → DuckDB parse → parquet → read back → verify."""
+        output_path = tmp_path / "test.parquet"
+        self._run_parse(sample_gz_dir, output_path)
 
         result = pl.read_parquet(output_path)
         assert result.shape[0] == 2
@@ -296,20 +355,7 @@ class TestDuckDBRoundTrip:
     def test_null_record_round_trip(self, sample_gz_dir, tmp_path):
         """Null-heavy record survives round-trip."""
         output_path = tmp_path / "test.parquet"
-        select_clause = build_select_clause(WORKS_SCHEMA)
-        gz_glob = find_gz_glob(sample_gz_dir)
-
-        con = duckdb.connect()
-        con.execute(f"""
-            COPY (
-                SELECT {select_clause}
-                FROM read_json_auto('{gz_glob}',
-                    format='newline_delimited',
-                    union_by_name=true,
-                    maximum_object_size=10485760)
-            ) TO '{output_path}' (FORMAT PARQUET)
-        """)
-        con.close()
+        self._run_parse(sample_gz_dir, output_path)
 
         result = pl.read_parquet(output_path)
         row_2020 = result.filter(pl.col("publication_year") == 2020)
@@ -319,21 +365,7 @@ class TestDuckDBRoundTrip:
     def test_limit(self, sample_gz_dir, tmp_path):
         """LIMIT clause works."""
         output_path = tmp_path / "test.parquet"
-        select_clause = build_select_clause(WORKS_SCHEMA)
-        gz_glob = find_gz_glob(sample_gz_dir)
-
-        con = duckdb.connect()
-        con.execute(f"""
-            COPY (
-                SELECT {select_clause}
-                FROM read_json_auto('{gz_glob}',
-                    format='newline_delimited',
-                    union_by_name=true,
-                    maximum_object_size=10485760)
-                LIMIT 1
-            ) TO '{output_path}' (FORMAT PARQUET)
-        """)
-        con.close()
+        self._run_parse(sample_gz_dir, output_path, limit=1)
 
         result = pl.read_parquet(output_path)
         assert result.shape[0] == 1
@@ -349,16 +381,17 @@ class TestIntegration:
     def test_parse_real_sample(self, tmp_path):
         """Parse 100 real records via DuckDB, write, read back."""
         output_path = tmp_path / "works.parquet"
-        select_clause = build_select_clause(WORKS_SCHEMA)
         gz_glob = str(REAL_DATA_DIR / "*.gz")
+        select_clause = build_select_clause(WORKS_SCHEMA)
+        columns_spec = build_columns_spec(WORKS_SCHEMA)
 
         con = duckdb.connect()
         con.execute(f"""
             COPY (
                 SELECT {select_clause}
-                FROM read_json_auto('{gz_glob}',
+                FROM read_json('{gz_glob}',
                     format='newline_delimited',
-                    union_by_name=true,
+                    columns={columns_spec},
                     maximum_object_size=10485760)
                 LIMIT 100
             ) TO '{output_path}' (FORMAT PARQUET)
