@@ -1,8 +1,21 @@
 # openalex_parse
 
-Generic pipeline for parsing raw OpenAlex gz JSON snapshots into parquet.
+Generic pipeline for parsing raw [OpenAlex](https://openalex.org/) gz JSON snapshots into parquet.
 Works with any entity type (works, authors, concepts, etc.) — just point it
 at the right schema config.
+
+## Why
+
+OpenAlex distributes data as gzipped JSON files partitioned by date (~1TB for works alone).
+Querying raw JSON is slow and memory-intensive. This tool converts it into columnar parquet
+so downstream analysis can read only the columns and rows it needs — fast and cheap.
+
+## Requirements
+
+- Python 3.12+
+- [DuckDB](https://duckdb.org/) (streaming engine)
+- [Polars](https://pola.rs/) (downstream queries)
+- pytest (tests)
 
 ## High-Level Workflow
 
@@ -36,16 +49,21 @@ at the right schema config.
 ## Structure
 
 ```
-openalex_parse/
-├── parse.py               # Generic parser: gz JSON → parquet (DuckDB engine)
-├── schema_detect.py       # Detect fields in raw data, diff against user schema
-└── schemas/
-    └── works.py           # User-defined schema for works (add authors.py, etc.)
+openalex_parse/              # repo root
+├── openalex_parse/          # Python package
+│   ├── parse.py             # Generic parser: gz JSON → parquet (DuckDB engine)
+│   ├── schema_detect.py     # Detect fields in raw data, diff against user schema
+│   ├── schemas/
+│   │   └── works.py         # User-defined schema for works (add authors.py, etc.)
+│   └── derived/
+│       └── work_topics.py   # Example Layer 2: paper × topic exploded table
+└── tests/
+    └── test_parse_works.py
 ```
 
 ## Quick Start
 
-All commands run from the project root (`openalex_manage/`).
+All commands run from the repo root.
 
 ### 1. Detect schema (what fields exist in the raw data?)
 
