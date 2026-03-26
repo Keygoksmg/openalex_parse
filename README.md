@@ -119,7 +119,7 @@ python -m openalex_parse.parse \
 import polars as pl
 
 df = pl.scan_parquet("data/intermediates/works.parquet")
-df_2024 = df.filter(pl.col("publication_year") == 2024).collect()
+df.filter(pl.col("publication_year") == 2024).head(10).collect()
 ```
 
 ### 5. Create derived tables (Layer 2)
