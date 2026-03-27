@@ -15,7 +15,6 @@ import time
 from pathlib import Path
 
 import duckdb
-import polars as pl
 
 
 def main():
@@ -105,7 +104,10 @@ def main():
 
     # Preview
     print()
-    print(pl.read_parquet(output_path).head(5))
+    preview = con.execute(
+        f"SELECT * FROM read_parquet('{out}') LIMIT 5"
+    ).fetchdf()
+    print(preview.to_string())
 
     con.close()
 

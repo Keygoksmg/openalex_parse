@@ -80,5 +80,13 @@ python -m pytest tests/ -v
 - **Mar 2026 snapshot**: `/share/yin/openalex-2026_03_26/data/`
 - **Mar 2026 parsed**: `/share/yin/openalex-2026_03_26/data-parsed/`
 
+## Resource Requirements
+- DuckDB streams via `read_json(columns=...)` — RAM stays flat regardless of dataset size
+- **Full works parse** (Mar 2026, 580 GB gz, 482M rows → 873 GB parquet): 8 CPUs, 128 GB RAM, 6h 44m (peak RSS: 108 GB)
+- **Single partition** (~9 GB gz): 2 CPUs, 8 GB RAM, ~10 min
+- **Derived tables**: 2 CPUs, 8 GB RAM, minutes
+- **Minimum** (will work but slower): 1 CPU, 4 GB RAM
+- More CPUs help with gz decompression + JSON parsing (DuckDB parallelizes across threads)
+
 ## Dependencies
 Python 3.12 (conda env: py312uv), polars, duckdb, pytest

@@ -1,12 +1,12 @@
 """
-Create a paper-topics table by exploding the topics JSON from works parquet.
+Unnest the counts_by_year array from works parquet.
 
-One row per paper × topic, with the full topic hierarchy.
+One row per paper x year with citation count.
 
 Usage:
-    python -m openalex_parse.derived.work_topics \
+    python -m openalex_parse.derived.work_counts_by_year \
         --input data/intermediates/works.parquet \
-        --output data/intermediates/work_topics.parquet
+        --output data/intermediates/work_counts_by_year.parquet
 """
 
 import argparse
@@ -18,7 +18,7 @@ import duckdb
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Explode works parquet into paper-topics table"
+        description="Unnest works counts_by_year into flat table"
     )
     parser.add_argument("--input", type=str, required=True,
                         help="Input works parquet file")
@@ -37,7 +37,6 @@ def main():
     t0 = time.time()
     con = duckdb.connect()
 
-    # Escape paths for safe SQL interpolation
     inp = str(input_path).replace("'", "''")
     out = str(output_path).replace("'", "''")
 
@@ -45,30 +44,22 @@ def main():
         COPY (
             SELECT
                 id AS work_id,
-                t.id AS topic_id,
-                t.display_name AS topic_display_name,
-                t.score AS topic_score,
-                t.subfield.display_name AS subfield,
-                t.field.display_name AS field,
-                t.domain.display_name AS domain
+                publication_year,
+                c.year AS count_year,
+                c.cited_by_count
             FROM read_parquet('{inp}'),
             LATERAL (
-                SELECT UNNEST(from_json(topics, '[{{
-                    "id": "VARCHAR",
-                    "display_name": "VARCHAR",
-                    "score": "DOUBLE",
-                    "subfield": {{"display_name": "VARCHAR"}},
-                    "field": {{"display_name": "VARCHAR"}},
-                    "domain": {{"display_name": "VARCHAR"}}
-                }}]')) AS t
+                SELECT UNNEST(from_json(counts_by_year, '[{{
+                    "year": "BIGINT",
+                    "cited_by_count": "BIGINT"
+                }}]')) AS c
             )
-            WHERE topics IS NOT NULL AND topics != '[]'
+            WHERE counts_by_year IS NOT NULL AND counts_by_year != '[]'
         ) TO '{out}' (FORMAT PARQUET)
     """)
 
     t1 = time.time()
 
-    # Summary
     row_count = con.execute(
         f"SELECT COUNT(*) FROM read_parquet('{out}')"
     ).fetchone()[0]
@@ -81,13 +72,6 @@ def main():
     print(f"  Output:     {output_path}")
     print(f"  File size:  {file_size:.2f} MB")
     print(f"  Total time: {t1 - t0:.1f}s")
-
-    # Preview
-    print()
-    preview = con.execute(
-        f"SELECT * FROM read_parquet('{out}') LIMIT 5"
-    ).fetchdf()
-    print(preview.to_string())
 
     con.close()
 

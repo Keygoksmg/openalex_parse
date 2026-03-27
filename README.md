@@ -213,6 +213,26 @@ work_authors = pl.DataFrame(rows)
 work_authors.write_parquet("data/intermediates/work_authors.parquet")
 ```
 
+## Resource Requirements
+
+The parser uses DuckDB's streaming engine — it never loads the full dataset into memory.
+
+| Task | CPU | RAM | Disk | Time |
+|------|-----|-----|------|------|
+| Parse full works (Mar 2026, 580 GB gz, 482M rows) | 8 cores | 128 GB | 873 GB output | 6h 44m |
+| Parse single partition (~9 GB gz) | 2 cores | 8 GB | ~15 GB output | ~10 min |
+| Parse small test (5K records) | 1 core | 2 GB | ~10 MB output | ~4 sec |
+| Derived tables from full parquet | 1-2 cores | 4-8 GB | varies | minutes |
+| Schema detection | 1 core | 1 GB | none | seconds |
+
+**Minimum**: 1 CPU and 4 GB RAM will work for any task, just slower.
+
+**CPU**: More cores help — DuckDB parallelizes gz decompression and JSON parsing across threads. 8 cores is a good balance for full parses.
+
+**Memory**: DuckDB streams data, but peak RSS reached 108 GB for the full works parse (482M rows, 65 columns). Allocate 128 GB for full parses; 8 GB is enough for single partitions or derived tables.
+
+**Disk**: Output parquet is roughly 1.5x the size of the compressed gz input (JSON string columns compress less than native columnar). For the full Mar 2026 works: 580 GB input → 873 GB output.
+
 ## Adding new entity types
 
 To parse `sources/`, `funders/`, etc.:
