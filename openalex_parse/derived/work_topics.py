@@ -1,11 +1,11 @@
 """
 Create a paper-topics table by exploding the topics JSON from works parquet.
 
-One row per paper × topic, with the full topic hierarchy.
+One row per paper x topic, with the full topic hierarchy.
 
 Usage:
     python -m openalex_parse.derived.work_topics \
-        --input data/intermediates/works.parquet \
+        --input data/intermediates/works/*.parquet \
         --output data/intermediates/work_topics.parquet
 """
 
@@ -13,7 +13,7 @@ import argparse
 import time
 from pathlib import Path
 
-import duckdb
+import polars as pl
 
 
 def main():
@@ -21,75 +21,61 @@ def main():
         description="Explode works parquet into paper-topics table"
     )
     parser.add_argument("--input", type=str, required=True,
-                        help="Input works parquet file")
+                        help="Input works parquet (file or glob)")
     parser.add_argument("--output", type=str, required=True,
                         help="Output parquet file")
     args = parser.parse_args()
 
-    input_path = Path(args.input)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Input:  {input_path}")
+    print(f"Input:  {args.input}")
     print(f"Output: {output_path}")
     print()
 
     t0 = time.time()
-    con = duckdb.connect()
 
-    # Escape paths for safe SQL interpolation
-    inp = str(input_path).replace("'", "''")
-    out = str(output_path).replace("'", "''")
+    lf = pl.scan_parquet(args.input)
 
-    con.execute(f"""
-        COPY (
-            SELECT
-                id AS work_id,
-                t.id AS topic_id,
-                t.display_name AS topic_display_name,
-                t.score AS topic_score,
-                t.subfield.display_name AS subfield,
-                t.field.display_name AS field,
-                t.domain.display_name AS domain
-            FROM read_parquet('{inp}'),
-            LATERAL (
-                SELECT UNNEST(from_json(topics, '[{{
-                    "id": "VARCHAR",
-                    "display_name": "VARCHAR",
-                    "score": "DOUBLE",
-                    "subfield": {{"display_name": "VARCHAR"}},
-                    "field": {{"display_name": "VARCHAR"}},
-                    "domain": {{"display_name": "VARCHAR"}}
-                }}]')) AS t
-            )
-            WHERE topics IS NOT NULL AND topics != '[]'
-        ) TO '{out}' (FORMAT PARQUET)
-    """)
+    result = (
+        lf.select(
+            pl.col("id").alias("work_id"),
+            pl.col("topics").str.json_decode(
+                pl.List(pl.Struct({
+                    "id": pl.Utf8,
+                    "display_name": pl.Utf8,
+                    "score": pl.Float64,
+                    "subfield": pl.Struct({"display_name": pl.Utf8}),
+                    "field": pl.Struct({"display_name": pl.Utf8}),
+                    "domain": pl.Struct({"display_name": pl.Utf8}),
+                }))
+            ).alias("_topics"),
+        )
+        .filter(pl.col("_topics").is_not_null())
+        .explode("_topics")
+        .with_columns(
+            pl.col("_topics").struct.field("id").alias("topic_id"),
+            pl.col("_topics").struct.field("display_name").alias("topic_display_name"),
+            pl.col("_topics").struct.field("score").alias("topic_score"),
+            pl.col("_topics").struct.field("subfield").struct.field("display_name").alias("subfield"),
+            pl.col("_topics").struct.field("field").struct.field("display_name").alias("field"),
+            pl.col("_topics").struct.field("domain").struct.field("display_name").alias("domain"),
+        )
+        .drop("_topics")
+    )
+
+    print("Sinking to parquet (streaming)...")
+    result.sink_parquet(output_path)
 
     t1 = time.time()
-
-    # Summary
-    row_count = con.execute(
-        f"SELECT COUNT(*) FROM read_parquet('{out}')"
-    ).fetchone()[0]
     file_size = output_path.stat().st_size / 1024 / 1024
 
-    print(f"{'─' * 60}")
+    print(f"\n{'─' * 60}")
     print(f"SUMMARY")
     print(f"{'─' * 60}")
-    print(f"  Records:    {row_count:,}")
     print(f"  Output:     {output_path}")
     print(f"  File size:  {file_size:.2f} MB")
     print(f"  Total time: {t1 - t0:.1f}s")
-
-    # Preview
-    print()
-    preview = con.execute(
-        f"SELECT * FROM read_parquet('{out}') LIMIT 5"
-    ).fetchdf()
-    print(preview.to_string())
-
-    con.close()
 
 
 if __name__ == "__main__":

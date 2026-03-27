@@ -13,37 +13,35 @@ so downstream analysis can read only the columns and rows it needs — fast and 
 ## Requirements
 
 - Python 3.12+
-- [DuckDB](https://duckdb.org/) (streaming engine)
-- [Polars](https://pola.rs/) (downstream queries)
+- [DuckDB](https://duckdb.org/) (Layer 1: gz JSON → parquet)
+- [Polars](https://pola.rs/) (Layer 2: derived tables + downstream queries)
 - pytest (tests)
 
 ## High-Level Workflow
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer 1: Base Extraction (done once per snapshot)              │
-│                                                                 │
-│  Raw gz JSON  ──►  Parquet (one file per entity type)           │
-│  (965 GB)          works.parquet, authors.parquet, etc.         │
-│                                                                 │
-│  - Simple field extraction, no exploding or joins               │
-│  - User-defined schema controls which fields to extract         │
-│  - DuckDB engine: streams data, memory safe at any scale        │
-│  - Expensive step (reads all raw data), but only done once      │
-└─────────────────────────────────────────────────────────────────┘
+│  Layer 1: Base Extraction — DuckDB (done once per snapshot)      │
+│                                                                  │
+│  Raw gz JSON  ──►  Parquet directory (one file per partition)     │
+│  (580 GB)          works/*.parquet, authors/*.parquet, etc.      │
+│                                                                  │
+│  - DuckDB read_json(columns=...) — streams gz, memory safe      │
+│  - User-defined schema controls which fields to extract          │
+│  - parse.py (single file) or parse_partitioned.py (per-partition)│
+└──────────────────────────────────────────────────────────────────┘
                               │
                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Layer 2: Derived Tables (ad hoc, per project)                  │
-│                                                                 │
-│  Parquet  ──►  Exploded/joined tables                           │
-│                work_author_institutions, work_topics, etc.      │
-│                                                                 │
-│  - Complex operations: explode arrays, join tables, filter      │
-│  - Reads only needed columns from parquet (fast)                │
-│  - Use DuckDB or Polars — whichever fits the task               │
-│  - Cheap to re-run, iterate, and experiment                     │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Layer 2: Derived Tables — Polars (ad hoc, per project)          │
+│                                                                  │
+│  Parquet  ──►  Analysis-ready tables                             │
+│                work_base, work_author_affiliations, etc.         │
+│                                                                  │
+│  - Polars scan_parquet → json_decode → explode → sink_parquet   │
+│  - Fully streaming: constant memory, no temp files              │
+│  - Each derived table is a single script                        │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Structure
@@ -51,29 +49,33 @@ so downstream analysis can read only the columns and rows it needs — fast and 
 ```
 openalex_parse/              # repo root
 ├── openalex_parse/          # Python package
-│   ├── parse.py             # Generic parser: gz JSON → parquet (DuckDB engine)
-│   ├── schema_detect.py     # Detect fields, diff against schema, auto-generate schema files
+│   ├── parse.py             # Layer 1: gz JSON → single parquet (DuckDB)
+│   ├── parse_partitioned.py # Layer 1: gz JSON → partitioned parquet dir (DuckDB)
+│   ├── schema_detect.py     # Detect fields, diff against schema, auto-generate
 │   ├── schemas/             # User-defined schemas (21 entity types)
 │   │   ├── works.py         # 65 fields (union across snapshots)
 │   │   ├── authors.py       # 18 fields
 │   │   ├── institutions.py  # 29 fields
 │   │   ├── sources.py       # 36 fields
-│   │   └── ...              # awards, concepts, countries, domains, fields, funders,
-│   │                        # institution_types, keywords, languages, licenses,
-│   │                        # publishers, sdgs, source_types, subfields, topics, etc.
-│   └── derived/
-│       ├── work_topics.py              # Paper × topic exploded table
+│   │   └── ...              # 17 more entity types
+│   └── derived/             # Layer 2: all Polars streaming (scan → sink)
+│       ├── work_base.py                # Paper-level flat table
 │       ├── work_title_abstracts.py     # Reconstruct abstracts from inverted index
-│       └── work_author_institutions.py # Paper × author × institution flat table
+│       ├── work_author_affiliations.py # Paper × author × institution
+│       ├── work_topics.py              # Paper × topic with hierarchy
+│       ├── work_referenced_works.py    # Paper × cited paper
+│       ├── work_counts_by_year.py      # Paper × year citation counts
+│       ├── work_locations.py           # Paper × location/source
+│       └── work_ids.py                 # Paper with all ID types
 └── tests/
-    ├── test_parse_works.py  # Parser tests (works round-trip, integration)
-    ├── test_schemas.py      # Schema loading + round-trip for all entities
-    └── test_derived.py      # Derived table tests (abstract reconstruction, authorship explode)
+    ├── test_parse_works.py
+    ├── test_schemas.py
+    └── test_derived.py
 ```
 
 ## Quick Start
 
-All commands run from the repo root. Replace `/path/to/openalex/` with wherever you downloaded the [OpenAlex snapshot](https://docs.openalex.org/download-all-data/download-to-your-machine) (e.g. via `aws s3 sync`).
+All commands run from the repo root. Replace `/path/to/openalex/` with wherever you downloaded the [OpenAlex snapshot](https://docs.openalex.org/download-all-data/download-to-your-machine).
 
 ### 1. Detect schema (what fields exist in the raw data?)
 
@@ -92,7 +94,7 @@ python -m openalex_parse.schema_detect \
 ### 2. Auto-generate or edit schema
 
 ```bash
-# Auto-generate a schema file (samples earliest + latest partitions for robustness)
+# Auto-generate (samples earliest + latest partitions for robustness)
 python -m openalex_parse.schema_detect \
     --data-dir /path/to/openalex/data/works \
     --generate openalex_parse/schemas/works.py
@@ -107,27 +109,28 @@ Fields in the schema but missing from the data become `NULL` automatically — s
 
 ### 3. Parse to parquet (Layer 1)
 
-All three params (`--input`, `--output`, `--schema`) are required.
+Two parsers available:
 
 ```bash
-# Works — test on one partition
+# parse.py — single output file (simpler, good for small entities)
+python -m openalex_parse.parse \
+    --input /path/to/openalex/data/authors \
+    --output data/intermediates/authors.parquet \
+    --schema openalex_parse/schemas/authors.py
+
+# parse_partitioned.py — one output file per partition (recommended for large entities)
+# Lower memory, progress tracking, resume support
+python -m openalex_parse.parse_partitioned \
+    --input /path/to/openalex/data/works \
+    --output data/intermediates/works \
+    --schema openalex_parse/schemas/works.py
+
+# Test with limit
 python -m openalex_parse.parse \
     --input /path/to/openalex/data/works/updated_date=2025-11-11 \
     --output data/intermediates/works_test.parquet \
     --schema openalex_parse/schemas/works.py \
     --limit 5000
-
-# Works — full directory
-python -m openalex_parse.parse \
-    --input /path/to/openalex/data/works \
-    --output data/intermediates/works.parquet \
-    --schema openalex_parse/schemas/works.py
-
-# Authors
-python -m openalex_parse.parse \
-    --input /path/to/openalex/data/authors \
-    --output data/intermediates/authors.parquet \
-    --schema openalex_parse/schemas/authors.py
 ```
 
 ### 4. Query the output
@@ -135,113 +138,87 @@ python -m openalex_parse.parse \
 ```python
 import polars as pl
 
-df = pl.scan_parquet("data/intermediates/works.parquet")
+# Single file
+df = pl.scan_parquet("data/intermediates/authors.parquet")
+
+# Partitioned directory (works as one table)
+df = pl.scan_parquet("data/intermediates/works/*.parquet")
+
 df.filter(pl.col("publication_year") == 2024).head(10).collect()
 ```
 
 ### 5. Create derived tables (Layer 2)
 
-Once Layer 1 converts raw .gz files into a queryable base parquet, you can create smaller, analysis-ready derived tables by unnesting and exploding the JSON array columns (authorships, topics, etc.).
-
-#### CLI-based derived tables
+All derived scripts use Polars streaming (`scan_parquet` → `sink_parquet`), keeping memory constant regardless of data size. Input can be a single file or a glob.
 
 ```bash
-# Work-topics
-python -m openalex_parse.derived.work_topics \
-    --input data/intermediates/works.parquet \
-    --output data/intermediates/work_topics.parquet
+# Paper-level flat table (scalar fields + unnested primary_topic, open_access, source)
+python -m openalex_parse.derived.work_base \
+    --input data/intermediates/works/*.parquet \
+    --output data/intermediates/work_base.parquet
 
-# Work-title-abstracts (reconstructs abstract text from inverted index)
+# Reconstruct abstracts from inverted index
 python -m openalex_parse.derived.work_title_abstracts \
-    --input data/intermediates/works.parquet \
+    --input data/intermediates/works/*.parquet \
     --output data/intermediates/work_title_abstracts.parquet
 
-# Work-author-institutions (one row per paper × author)
-python -m openalex_parse.derived.work_author_institutions \
-    --input data/intermediates/works.parquet \
-    --output data/intermediates/work_author_institutions.parquet
-```
+# Paper × author × institution (all affiliations, not just first)
+python -m openalex_parse.derived.work_author_affiliations \
+    --input data/intermediates/works/*.parquet \
+    --output data/intermediates/work_author_affiliations.parquet
 
-#### Custom derived tables (DuckDB example)
+# Paper × topic with hierarchy
+python -m openalex_parse.derived.work_topics \
+    --input data/intermediates/works/*.parquet \
+    --output data/intermediates/work_topics.parquet
 
-```python
-import duckdb
+# Paper × cited paper
+python -m openalex_parse.derived.work_referenced_works \
+    --input data/intermediates/works/*.parquet \
+    --output data/intermediates/work_referenced_works.parquet
 
-duckdb.sql("""
-    COPY (
-        SELECT
-            w.id AS work_id,
-            w.publication_year,
-            a.author.id AS author_id,
-            a.author.display_name AS author_name,
-            a.institutions[1].id AS institution_id,
-            a.institutions[1].country_code AS country_code,
-            a.author_position
-        FROM read_parquet('data/intermediates/works.parquet') w,
-             unnest(from_json(w.authorships, '[{
-                "author": {"id": "VARCHAR", "display_name": "VARCHAR"},
-                "institutions": [{"id": "VARCHAR", "country_code": "VARCHAR"}],
-                "author_position": "VARCHAR"
-             }]')) AS a
-    ) TO 'data/intermediates/work_authors.parquet' (FORMAT PARQUET);
-""")
-```
+# Paper × year citation counts
+python -m openalex_parse.derived.work_counts_by_year \
+    --input data/intermediates/works/*.parquet \
+    --output data/intermediates/work_counts_by_year.parquet
 
-#### Custom derived tables (Polars example)
+# Paper × location/source
+python -m openalex_parse.derived.work_locations \
+    --input data/intermediates/works/*.parquet \
+    --output data/intermediates/work_locations.parquet
 
-```python
-import json
-import polars as pl
-
-df = pl.read_parquet(
-    "data/intermediates/works.parquet",
-    columns=["id", "publication_year", "authorships"],
-)
-rows = []
-for row in df.iter_rows(named=True):
-    for auth in json.loads(row["authorships"] or "[]"):
-        inst = (auth.get("institutions") or [{}])[0] if auth.get("institutions") else {}
-        rows.append({
-            "work_id": row["id"],
-            "publication_year": row["publication_year"],
-            "author_id": auth.get("author", {}).get("id"),
-            "author_name": auth.get("author", {}).get("display_name"),
-            "institution_id": inst.get("id"),
-            "country_code": inst.get("country_code"),
-        })
-work_authors = pl.DataFrame(rows)
-work_authors.write_parquet("data/intermediates/work_authors.parquet")
+# Paper with all ID types (openalex, doi, mag, pmid, pmcid)
+python -m openalex_parse.derived.work_ids \
+    --input data/intermediates/works/*.parquet \
+    --output data/intermediates/work_ids.parquet
 ```
 
 ## Resource Requirements
 
-The parser uses DuckDB's streaming engine — it never loads the full dataset into memory.
+**Layer 1 (DuckDB)** — gz decompression + JSON parsing is CPU-bound:
 
 | Task | CPU | RAM | Disk | Time |
 |------|-----|-----|------|------|
-| Parse full works (Mar 2026, 580 GB gz, 482M rows) | 8 cores | 128 GB | 873 GB output | 6h 44m |
-| Parse single partition (~9 GB gz) | 2 cores | 8 GB | ~15 GB output | ~10 min |
-| Parse small test (5K records) | 1 core | 2 GB | ~10 MB output | ~4 sec |
-| Derived tables from full parquet | 1-2 cores | 4-8 GB | varies | minutes |
-| Schema detection | 1 core | 1 GB | none | seconds |
+| Full works parse_partitioned (Mar 2026, 580 GB gz, 482M rows) | 8 cores | 120 GB | 873 GB output | 7h 5m |
+| Full works parse single-file (same data) | 8 cores | 128 GB | 873 GB output | 6h 44m |
+| Single partition (~9 GB gz) | 2 cores | 8 GB | ~15 GB output | ~10 min |
+| Small test (5K records) | 1 core | 2 GB | ~10 MB output | ~4 sec |
+
+**Layer 2 (Polars streaming)** — constant memory via `sink_parquet`:
+
+| Task | CPU | RAM | Time |
+|------|-----|-----|------|
+| Derived tables (work_base, topics, etc.) | 4 cores | 32 GB | minutes |
 
 **Minimum**: 1 CPU and 4 GB RAM will work for any task, just slower.
 
-**CPU**: More cores help — DuckDB parallelizes gz decompression and JSON parsing across threads. 8 cores is a good balance for full parses.
-
-**Memory**: DuckDB streams data, but peak RSS reached 108 GB for the full works parse (482M rows, 65 columns). Allocate 128 GB for full parses; 8 GB is enough for single partitions or derived tables.
-
-**Disk**: Output parquet is roughly 1.5x the size of the compressed gz input (JSON string columns compress less than native columnar). For the full Mar 2026 works: 580 GB input → 873 GB output.
-
 ## Adding new entity types
-
-To parse `sources/`, `funders/`, etc.:
 
 1. Auto-generate schema: `python -m openalex_parse.schema_detect --data-dir .../data/sources --generate openalex_parse/schemas/sources.py`
 2. Review and edit the generated schema if needed
-3. Parse: `python -m openalex_parse.parse --input .../data/sources --output .../sources.parquet --schema openalex_parse/schemas/sources.py`
+3. Parse: `python -m openalex_parse.parse_partitioned --input .../data/sources --output .../sources --schema openalex_parse/schemas/sources.py`
 
-No new parser code needed — the same `parse.py` handles everything.
+No new parser code needed — the same `parse.py` / `parse_partitioned.py` handles everything.
 Schemas already exist for all 21 entity types in the Mar 2026 snapshot.
 
 ## Tests
