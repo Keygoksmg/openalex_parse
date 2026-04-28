@@ -52,6 +52,7 @@ def main():
                     "license_id": pl.Utf8,
                     "version": pl.Utf8,
                     "provenance": pl.Utf8,
+                    "raw_source_name": pl.Utf8,
                     "source": pl.Struct({
                         "id": pl.Utf8,
                         "display_name": pl.Utf8,
@@ -78,6 +79,7 @@ def main():
             pl.col("_locs").struct.field("license_id"),
             pl.col("_locs").struct.field("version"),
             pl.col("_locs").struct.field("provenance"),
+            pl.col("_locs").struct.field("raw_source_name"),
             pl.col("_locs").struct.field("source").struct.field("id").alias("source_id"),
             pl.col("_locs").struct.field("source").struct.field("display_name").alias("source_name"),
             pl.col("_locs").struct.field("source").struct.field("issn_l"),

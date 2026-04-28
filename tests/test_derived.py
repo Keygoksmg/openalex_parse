@@ -50,7 +50,16 @@ SAMPLE_WORKS = [
         "updated": "2023-01-01T00:00:00.000000",
         "updated_date": "2023-01-01T00:00:00.000000",
         "ids": {"openalex": "https://openalex.org/W1"},
-        "primary_location": None,
+        "primary_location": {
+            "raw_source_name": "Journal of Testing",
+            "source": {
+                "id": "https://openalex.org/S1",
+                "display_name": "Journal of Testing",
+                "type": "journal",
+                "issn_l": "1234-5678",
+                "host_organization_name": "Test Publisher",
+            },
+        },
         "open_access": {"is_oa": True},
         "best_oa_location": None,
         "citation_normalized_percentile": None,
@@ -91,7 +100,31 @@ SAMPLE_WORKS = [
         "topics": [],
         "related_works": [],
         "referenced_works": [],
-        "locations": [],
+        "locations": [
+            {
+                "is_oa": True,
+                "is_published": True,
+                "is_accepted": True,
+                "landing_page_url": "https://example.org/w1",
+                "pdf_url": None,
+                "license": None,
+                "license_id": None,
+                "version": "publishedVersion",
+                "provenance": None,
+                "raw_source_name": "Journal of Testing",
+                "source": {
+                    "id": "https://openalex.org/S1",
+                    "display_name": "Journal of Testing",
+                    "issn_l": "1234-5678",
+                    "type": "journal",
+                    "is_oa": False,
+                    "is_in_doaj": False,
+                    "is_core": False,
+                    "host_organization": None,
+                    "host_organization_name": "Test Publisher",
+                },
+            },
+        ],
         "counts_by_year": [],
         "corresponding_author_ids": ["https://openalex.org/A1"],
         "corresponding_institution_ids": ["https://openalex.org/I1"],
@@ -369,6 +402,51 @@ class TestWorkAuthorInstitutions:
         # Only W1 has authors
         work_ids = result["work_id"].unique().to_list()
         assert work_ids == ["https://openalex.org/W1"]
+
+
+# ── work_base derived table ──────────────────────────────────────────────────
+
+class TestWorkBase:
+    def test_raw_source_name_flattened(self, works_parquet, tmp_path):
+        """work_base extracts primary_location.raw_source_name alongside source.*"""
+        import subprocess, sys
+        output_path = tmp_path / "work_base.parquet"
+        subprocess.run(
+            [sys.executable, "-m", "openalex_parse.derived.work_base",
+             "--input", str(works_parquet), "--output", str(output_path)],
+            check=True,
+        )
+        result = pl.read_parquet(output_path)
+        assert "raw_source_name" in result.columns
+        assert "source_name" in result.columns  # sanity: didn't drop existing column
+
+        w1 = result.filter(pl.col("work_id") == "https://openalex.org/W1")
+        assert w1["raw_source_name"][0] == "Journal of Testing"
+        assert w1["source_name"][0] == "Journal of Testing"
+
+        w2 = result.filter(pl.col("work_id") == "https://openalex.org/W2")
+        assert w2["raw_source_name"][0] is None
+
+
+# ── work_locations derived table ─────────────────────────────────────────────
+
+class TestWorkLocations:
+    def test_raw_source_name_exploded(self, works_parquet, tmp_path):
+        """work_locations keeps raw_source_name on each exploded location row."""
+        import subprocess, sys
+        output_path = tmp_path / "work_locations.parquet"
+        subprocess.run(
+            [sys.executable, "-m", "openalex_parse.derived.work_locations",
+             "--input", str(works_parquet), "--output", str(output_path)],
+            check=True,
+        )
+        result = pl.read_parquet(output_path)
+        assert "raw_source_name" in result.columns
+
+        w1_rows = result.filter(pl.col("work_id") == "https://openalex.org/W1")
+        assert w1_rows.shape[0] == 1
+        assert w1_rows["raw_source_name"][0] == "Journal of Testing"
+        assert w1_rows["source_name"][0] == "Journal of Testing"
 
 
 # ── Integration (requires parsed test data) ──────────────────────────────────

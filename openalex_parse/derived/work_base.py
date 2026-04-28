@@ -79,6 +79,7 @@ def main():
         # Primary location
         pl.col("primary_location").str.json_decode(
             pl.Struct({
+                "raw_source_name": pl.Utf8,
                 "source": pl.Struct({
                     "id": pl.Utf8,
                     "display_name": pl.Utf8,
@@ -101,6 +102,7 @@ def main():
         pl.col("_oa").struct.field("is_oa"),
         pl.col("_oa").struct.field("oa_status"),
         pl.col("_oa").struct.field("oa_url"),
+        pl.col("_pl").struct.field("raw_source_name"),
         pl.col("_pl").struct.field("source").struct.field("id").alias("source_id"),
         pl.col("_pl").struct.field("source").struct.field("display_name").alias("source_name"),
         pl.col("_pl").struct.field("source").struct.field("type").alias("source_type"),
