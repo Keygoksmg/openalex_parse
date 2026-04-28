@@ -9,3 +9,5 @@ logs/
 history.md
 README.local.md
 .tmp/
+polars_plugin/target/
+polars_plugin/polars_plugin/*.so
