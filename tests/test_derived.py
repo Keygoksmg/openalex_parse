@@ -244,31 +244,25 @@ class TestReconstructAbstract:
 class TestWorkTitleAbstracts:
     def test_output_schema(self, works_parquet, tmp_path):
         """Title-abstract table has correct columns."""
-        from openalex_parse.derived.work_title_abstracts import reconstruct_abstract
+        from openalex_parse.derived.work_title_abstracts import process_one_file
 
-        df = pl.read_parquet(works_parquet, columns=["id", "doi", "title", "abstract_inverted_index"])
-        result = df.select(
-            pl.col("id").alias("work_id"),
-            pl.col("doi"),
-            pl.col("title"),
-            pl.col("abstract_inverted_index")
-              .map_elements(reconstruct_abstract, return_dtype=pl.Utf8)
-              .alias("abstract"),
-        )
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        output_path = out_dir / "out.parquet"
+        process_one_file((str(works_parquet), str(output_path)))
+        result = pl.read_parquet(list(out_dir.glob("*.parquet")))
         assert set(result.columns) == {"work_id", "doi", "title", "abstract"}
         assert result.shape[0] == 2
 
     def test_abstract_reconstruction(self, works_parquet, tmp_path):
         """Abstracts are correctly reconstructed."""
-        from openalex_parse.derived.work_title_abstracts import reconstruct_abstract
+        from openalex_parse.derived.work_title_abstracts import process_one_file
 
-        df = pl.read_parquet(works_parquet, columns=["id", "abstract_inverted_index"])
-        result = df.select(
-            pl.col("id").alias("work_id"),
-            pl.col("abstract_inverted_index")
-              .map_elements(reconstruct_abstract, return_dtype=pl.Utf8)
-              .alias("abstract"),
-        )
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        output_path = out_dir / "out.parquet"
+        process_one_file((str(works_parquet), str(output_path)))
+        result = pl.read_parquet(list(out_dir.glob("*.parquet")))
 
         # W1 has abstract
         w1 = result.filter(pl.col("work_id") == "https://openalex.org/W1")
@@ -386,20 +380,12 @@ WORKS_TEST_PARQUET = Path("/share/yin/kk929_codes/openalex_parse/data/intermedia
 class TestDerivedIntegration:
     def test_title_abstracts_on_real_data(self, tmp_path):
         """Reconstruct abstracts from real parsed data."""
-        df = pl.read_parquet(
-            WORKS_TEST_PARQUET,
-            columns=["id", "doi", "title", "abstract_inverted_index"],
-            n_rows=100,
-        )
-        result = df.select(
-            pl.col("id").alias("work_id"),
-            pl.col("doi"),
-            pl.col("title"),
-            pl.col("abstract_inverted_index")
-              .map_elements(reconstruct_abstract, return_dtype=pl.Utf8)
-              .alias("abstract"),
-        )
-        assert result.shape[0] == 100
+        from openalex_parse.derived.work_title_abstracts import process_one_file
+
+        output_path = tmp_path / "abstracts.parquet"
+        process_one_file((str(WORKS_TEST_PARQUET), str(output_path)))
+        result = pl.read_parquet(output_path)
+        assert result.shape[0] > 0
         assert set(result.columns) == {"work_id", "doi", "title", "abstract"}
         # At least some should have abstracts
         n_with_abstract = result.filter(pl.col("abstract").is_not_null()).shape[0]
